@@ -8,6 +8,7 @@ import streamlit as st
 import sqlite3
 import pandas as pd
 import json
+import sys
 from pathlib import Path
 from datetime import datetime, timedelta
 from typing import List, Dict
@@ -404,8 +405,8 @@ def generate_tomorrow_preview(lsi_score: float) -> str:
 
 # ==================== 页面布局 ====================
 
-tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
-    "🚨 好运雷达", "📈 净值与绩效", "📋 交易明细", "🧠 反思与优化", "⚙️ 当前持仓", "🔮 明日策略预告"
+tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
+    "🚨 好运雷达", "📈 净值与绩效", "📋 交易明细", "🧠 反思与优化", "⚙️ 当前持仓", "🔮 明日策略预告", "🔐 东财账户配置"
 ])
 
 # 全局自动刷新：每 10 分钟
@@ -613,3 +614,198 @@ with tab6:
 
 st.divider()
 st.caption(f"揽宝量化 · 好运哥2008 · 最后更新: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+
+
+# ---------- Tab 7: 东财账户配置 ----------
+# 确保路径可导入
+if '/root/lanbao/scripts/auto_favor' not in sys.path:
+    sys.path.insert(0, '/root/lanbao/scripts/auto_favor')
+if '/root/lanbao/tools/eastmoney-mcp-server/src' not in sys.path:
+    sys.path.insert(0, '/root/lanbao/tools/eastmoney-mcp-server/src')
+
+try:
+    from env_manager import EnvManager
+    from login_eastmoney import (
+        generate_qr_code_sync,
+        check_login_sync,
+        verify_account_sync,
+        verify_all_accounts_sync,
+        LoginResult,
+    )
+    EASTMONEY_CONFIG_AVAILABLE = True
+except Exception as e:
+    EASTMONEY_CONFIG_AVAILABLE = False
+    st.error(f"东财登录模块加载失败: {e}")
+
+
+def _load_account_config() -> dict:
+    """加载 auto_favor.yaml 中的账户配置"""
+    import yaml
+    config_path = "/root/lanbao/config/auto_favor.yaml"
+    if not Path(config_path).exists():
+        return {"default": {"name": "主账户", "env_prefix": "", "enabled": True}}
+    with open(config_path, "r", encoding="utf-8") as f:
+        data = yaml.safe_load(f)
+    return data.get("accounts", {})
+
+
+def _render_status_badge(ok: bool) -> str:
+    return "✅" if ok else "❌"
+
+
+with tab7:
+    st.subheader("🔐 东方财富账户配置")
+
+    if not EASTMONEY_CONFIG_AVAILABLE:
+        st.warning("东财登录模块未可用，请检查依赖安装。")
+    else:
+        accounts = _load_account_config()
+        env = EnvManager("/root/lanbao/tools/eastmoney-mcp-server/.env")
+
+        # --- 顶部: 所有账户状态概览 ---
+        st.markdown("#### 📊 账户凭证状态")
+        status_cols = st.columns(len(accounts))
+        for idx, (account_id, cfg) in enumerate(accounts.items()):
+            if not cfg.get("enabled", True):
+                continue
+            prefix = cfg.get("env_prefix", "")
+            cookie_ok, uid_ok = env.get_account_status(account_id)
+            name = cfg.get("name", account_id)
+
+            with status_cols[idx]:
+                st.metric(
+                    label=name,
+                    value="正常" if cookie_ok else "未配置",
+                    delta="已验证" if cookie_ok else "需登录",
+                    delta_color="normal" if cookie_ok else "inverse",
+                )
+                st.caption(
+                    f"COOKIE: {_render_status_badge(cookie_ok)} | "
+                    f"USER_ID: {_render_status_badge(uid_ok)}"
+                )
+
+        st.divider()
+
+        # --- 中部: 扫码登录 ---
+        left_col, right_col = st.columns([1, 1])
+
+        with left_col:
+            st.markdown("#### 📱 扫码登录")
+            account_options = {
+                aid: cfg.get("name", aid)
+                for aid, cfg in accounts.items()
+                if cfg.get("enabled", True)
+            }
+            selected_account = st.selectbox(
+                "选择要登录的账户",
+                options=list(account_options.keys()),
+                format_func=lambda x: account_options[x],
+                key="em_account_select",
+            )
+
+            # session_state 初始化
+            if "qr_generated" not in st.session_state:
+                st.session_state.qr_generated = False
+            if "qr_image_path" not in st.session_state:
+                st.session_state.qr_image_path = ""
+            if "qr_account" not in st.session_state:
+                st.session_state.qr_account = ""
+            if "login_result" not in st.session_state:
+                st.session_state.login_result = None
+
+            btn_col1, btn_col2 = st.columns(2)
+            with btn_col1:
+                generate_clicked = st.button("🔑 生成登录二维码", use_container_width=True)
+            with btn_col2:
+                check_clicked = st.button("🔍 检测登录状态", use_container_width=True)
+
+            if generate_clicked:
+                qr_path = f"/tmp/eastmoney_qr_{selected_account}.png"
+                with st.spinner("正在启动浏览器生成二维码，请稍候..."):
+                    try:
+                        ok = generate_qr_code_sync(selected_account, qr_path)
+                        if ok:
+                            st.session_state.qr_generated = True
+                            st.session_state.qr_image_path = qr_path
+                            st.session_state.qr_account = selected_account
+                            st.session_state.login_result = None
+                            st.success("二维码已生成，请在右侧查看")
+                        else:
+                            st.error("二维码生成失败")
+                    except Exception as e:
+                        st.error(f"生成二维码异常: {e}")
+
+            if check_clicked:
+                with st.spinner("正在检测登录状态..."):
+                    try:
+                        result = check_login_sync(selected_account, dry_run=False)
+                        st.session_state.login_result = result
+                        if result.success:
+                            st.success(f"登录成功！{result.message}")
+                            st.session_state.qr_generated = False
+                            st.rerun()
+                        else:
+                            st.warning(result.message)
+                    except Exception as e:
+                        st.error(f"检测异常: {e}")
+
+            # 显示登录结果
+            if st.session_state.login_result and not st.session_state.login_result.success:
+                result = st.session_state.login_result
+                st.info(f"上次检测结果: {result.message}")
+
+        with right_col:
+            st.markdown("#### 🖼️ 二维码")
+            if st.session_state.qr_generated and st.session_state.qr_image_path:
+                if Path(st.session_state.qr_image_path).exists():
+                    st.image(
+                        st.session_state.qr_image_path,
+                        caption=f"请用东方财富APP扫描 | 账户: {st.session_state.qr_account}",
+                        use_container_width=True,
+                    )
+                    st.info("💡 扫描后请点击左侧「检测登录状态」按钮")
+                else:
+                    st.warning("二维码图片已过期，请重新生成")
+            else:
+                st.info("点击左侧「生成登录二维码」按钮后，二维码将显示在这里")
+
+        st.divider()
+
+        # --- 底部: 手动配置 ---
+        with st.expander("✏️ 手动配置凭证（高级）"):
+            manual_account = st.selectbox(
+                "选择账户",
+                options=list(account_options.keys()),
+                format_func=lambda x: account_options[x],
+                key="manual_account",
+            )
+            prefix = accounts.get(manual_account, {}).get("env_prefix", "")
+            cookie_key = f"{prefix}EASTMONEY_COOKIE"
+            uid_key = f"{prefix}EASTMONEY_USER_ID"
+
+            current_cookie = env.get(cookie_key, "")
+            current_uid = env.get(uid_key, "")
+
+            new_cookie = st.text_area(
+                "COOKIE（格式: ct=xxx; ut=yyy;）",
+                value=current_cookie or "",
+                height=80,
+            )
+            new_uid = st.text_input(
+                "USER_ID",
+                value=current_uid or "",
+            )
+
+            if st.button("💾 保存手动配置"):
+                try:
+                    env.update_account_credentials(manual_account, new_cookie, new_uid)
+                    env.save()
+                    st.success(f"已保存 {manual_account} 账户的凭证")
+                    # 验证
+                    is_valid, msg = verify_account_sync(manual_account)
+                    if is_valid:
+                        st.success(f"验证通过: {msg}")
+                    else:
+                        st.warning(f"验证未通过: {msg}")
+                except Exception as e:
+                    st.error(f"保存失败: {e}")
