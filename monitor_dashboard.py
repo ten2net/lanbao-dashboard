@@ -13,18 +13,16 @@ from datetime import datetime, timedelta
 from typing import List, Dict
 from streamlit_autorefresh import st_autorefresh
 
+sys.path.insert(0, '/root/lanbao')
+from config import get_opt_params
+
 st.set_page_config(page_title="揽宝量化监控看板", layout="wide")
 
 DB_PATH = "/root/lanbao/data/lanbao.db"
 RESULTS_DIR = Path("/root/lanbao/backtests/results")
 
-# 经回测优化的最优参数
-OPT_PARAMS = {
-    "hard_stop_loss": 0.05,
-    "max_single_position": 0.10,
-    "lsi_buy_threshold": 50,
-    "leader_change_pct_threshold": 0.07,
-}
+# 经回测优化的最优参数，统一从 config/trading.yaml 读取
+OPT_PARAMS = get_opt_params()
 
 st.title("📊 揽宝量化 - 好运哥2008 监控看板")
 
