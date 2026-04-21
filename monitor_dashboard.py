@@ -637,8 +637,10 @@ try:
         check_login_sync,
         verify_account_sync,
         verify_all_accounts_sync,
+        register_eastmoney_user,
         LoginResult,
     )
+    from user_manager import list_users, delete_user, get_user_by_user_id
     EASTMONEY_CONFIG_AVAILABLE = True
 except Exception as e:
     EASTMONEY_CONFIG_AVAILABLE = False
@@ -656,8 +658,30 @@ def _load_account_config() -> dict:
     return data.get("accounts", {})
 
 
+def _save_account_config(accounts: dict):
+    """保存账户配置到 auto_favor.yaml（保留其他配置）"""
+    import yaml
+    config_path = "/root/lanbao/config/auto_favor.yaml"
+    data = {}
+    if Path(config_path).exists():
+        with open(config_path, "r", encoding="utf-8") as f:
+            data = yaml.safe_load(f) or {}
+    data["accounts"] = accounts
+    with open(config_path, "w", encoding="utf-8") as f:
+        yaml.dump(data, f, allow_unicode=True, sort_keys=False)
+
+
 def _render_status_badge(ok: bool) -> str:
     return "✅" if ok else "❌"
+
+
+def _get_next_env_prefix(accounts: dict) -> str:
+    """生成下一个不冲突的 env_prefix"""
+    existing = {cfg.get("env_prefix", "") for cfg in accounts.values()}
+    n = 1
+    while f"USER{n}_" in existing:
+        n += 1
+    return f"USER{n}_"
 
 
 with tab7:
@@ -666,119 +690,201 @@ with tab7:
     if not EASTMONEY_CONFIG_AVAILABLE:
         st.warning("东财登录模块未可用，请检查依赖安装。")
     else:
-        accounts = _load_account_config()
         env = EnvManager("/root/lanbao/tools/eastmoney-mcp-server/.env")
 
-        # --- 顶部: 所有账户状态概览 ---
-        st.markdown("#### 📊 账户凭证状态")
-        status_cols = st.columns(len(accounts))
-        for idx, (account_id, cfg) in enumerate(accounts.items()):
-            if not cfg.get("enabled", True):
-                continue
-            prefix = cfg.get("env_prefix", "")
-            cookie_ok, uid_ok = env.get_account_status(account_id)
-            name = cfg.get("name", account_id)
+        # --- session_state 初始化 ---
+        for key in ["reg_step", "reg_cookie", "reg_user_id", "reg_qr_path",
+                    "qr_generated", "qr_image_path", "qr_account", "login_result"]:
+            if key not in st.session_state:
+                st.session_state[key] = "" if "path" in key or "cookie" in key or "id" in key else False
+        if st.session_state.reg_step == "":
+            st.session_state.reg_step = "idle"
 
-            with status_cols[idx]:
-                st.metric(
-                    label=name,
-                    value="正常" if cookie_ok else "未配置",
-                    delta="已验证" if cookie_ok else "需登录",
-                    delta_color="normal" if cookie_ok else "inverse",
-                )
-                st.caption(
-                    f"COOKIE: {_render_status_badge(cookie_ok)} | "
-                    f"USER_ID: {_render_status_badge(uid_ok)}"
-                )
-
-        st.divider()
-
-        # --- 中部: 扫码登录 ---
+        # --- 两栏布局 ---
         left_col, right_col = st.columns([1, 1])
 
+        # ========== 左栏：已注册东财用户 ==========
         with left_col:
-            st.markdown("#### 📱 扫码登录")
-            account_options = {
-                aid: cfg.get("name", aid)
-                for aid, cfg in accounts.items()
-                if cfg.get("enabled", True)
-            }
-            selected_account = st.selectbox(
-                "选择要登录的账户",
-                options=list(account_options.keys()),
-                format_func=lambda x: account_options[x],
-                key="em_account_select",
-            )
+            st.markdown("#### 👥 已注册东财用户")
 
-            # session_state 初始化
-            if "qr_generated" not in st.session_state:
-                st.session_state.qr_generated = False
-            if "qr_image_path" not in st.session_state:
-                st.session_state.qr_image_path = ""
-            if "qr_account" not in st.session_state:
-                st.session_state.qr_account = ""
-            if "login_result" not in st.session_state:
-                st.session_state.login_result = None
+            with sqlite3.connect(DB_PATH) as conn:
+                users = list_users(conn, platform="eastmoney")
 
-            btn_col1, btn_col2 = st.columns(2)
-            with btn_col1:
-                generate_clicked = st.button("🔑 生成登录二维码", use_container_width=True)
-            with btn_col2:
-                check_clicked = st.button("🔍 检测登录状态", use_container_width=True)
+            if not users:
+                st.info("暂无已注册的东财用户。请使用右侧「新用户注册」功能。")
+            else:
+                for u in users:
+                    with st.container(border=True):
+                        c1, c2 = st.columns([3, 1])
+                        with c1:
+                            st.write(f"**{u['username'] or '未命名'}**")
+                            st.caption(
+                                f"手机: {u['phone'] or '未填写'} ｜ "
+                                f"user_id: {u['user_id']} ｜ "
+                                f"注册: {u['created_at'][:10] if u['created_at'] else 'N/A'}"
+                            )
+                        with c2:
+                            # 凭证状态
+                            prefix = ""
+                            for aid, cfg in _load_account_config().items():
+                                if cfg.get("env_prefix", "") and env.get(f"{cfg['env_prefix']}EASTMONEY_USER_ID") == u['user_id']:
+                                    prefix = cfg['env_prefix']
+                                    break
+                            cookie_key = f"{prefix}EASTMONEY_COOKIE" if prefix else "EASTMONEY_COOKIE"
+                            has_cookie = bool(env.get(cookie_key))
+                            st.write(f"凭证: {_render_status_badge(has_cookie)}")
 
-            if generate_clicked:
-                qr_path = f"/tmp/eastmoney_qr_{selected_account}.png"
-                with st.spinner("正在启动浏览器生成二维码，请稍候..."):
+                            delete_key = f"del_user_{u['id']}"
+                            if st.button("🗑️ 删除", key=delete_key):
+                                with sqlite3.connect(DB_PATH) as conn:
+                                    delete_user(conn, u['user_id'], "eastmoney")
+                                st.success("已删除")
+                                st.rerun()
+
+        # ========== 右栏：新用户注册 ==========
+        with right_col:
+            st.markdown("#### 📝 新用户注册")
+
+            if st.session_state.reg_step == "idle":
+                st.info("欢迎注册揽宝！请填写昵称并开始扫码登录。")
+                reg_nickname = st.text_input("昵称（可选）", key="reg_nickname_idle")
+                if st.button("🚀 开始注册", use_container_width=True):
+                    st.session_state.reg_nickname = reg_nickname
+                    st.session_state.reg_step = "qr"
+                    st.rerun()
+
+            elif st.session_state.reg_step == "qr":
+                st.write("**步骤 1/3：生成二维码**")
+                nickname = st.session_state.get("reg_nickname", "")
+                st.caption(f"注册昵称: {nickname or '（未填写）'}")
+
+                if not st.session_state.qr_generated:
+                    if st.button("🔑 生成登录二维码", use_container_width=True):
+                        qr_path = "/tmp/eastmoney_qr_register.png"
+                        with st.spinner("正在启动浏览器..."):
+                            try:
+                                ok = generate_qr_code_sync("default", qr_path)
+                                if ok:
+                                    st.session_state.qr_generated = True
+                                    st.session_state.qr_image_path = qr_path
+                                    st.session_state.qr_account = "default"
+                                    st.rerun()
+                                else:
+                                    st.error("二维码生成失败")
+                            except Exception as e:
+                                st.error(f"异常: {e}")
+                else:
+                    if Path(st.session_state.qr_image_path).exists():
+                        st.image(
+                            st.session_state.qr_image_path,
+                            caption="请用东方财富APP扫描",
+                            use_container_width=True,
+                        )
+                        if st.button("🔍 我已完成扫码，检测登录", use_container_width=True):
+                            st.session_state.reg_step = "check"
+                            st.rerun()
+                    else:
+                        st.warning("二维码已过期")
+                        st.session_state.qr_generated = False
+                        st.rerun()
+
+                if st.button("↩️ 返回"):
+                    st.session_state.reg_step = "idle"
+                    st.session_state.qr_generated = False
+                    st.rerun()
+
+            elif st.session_state.reg_step == "check":
+                st.write("**步骤 2/3：检测登录状态**")
+                with st.spinner("正在检测..."):
                     try:
-                        ok = generate_qr_code_sync(selected_account, qr_path)
-                        if ok:
-                            st.session_state.qr_generated = True
-                            st.session_state.qr_image_path = qr_path
-                            st.session_state.qr_account = selected_account
-                            st.session_state.login_result = None
-                            st.success("二维码已生成，请在右侧查看")
-                        else:
-                            st.error("二维码生成失败")
-                    except Exception as e:
-                        st.error(f"生成二维码异常: {e}")
-
-            if check_clicked:
-                with st.spinner("正在检测登录状态..."):
-                    try:
-                        result = check_login_sync(selected_account, dry_run=False)
-                        st.session_state.login_result = result
+                        result = check_login_sync("default", dry_run=False)
                         if result.success:
-                            st.success(f"登录成功！{result.message}")
-                            st.session_state.qr_generated = False
+                            st.session_state.reg_cookie = result.cookie
+                            st.session_state.reg_user_id = result.user_id
+                            st.session_state.reg_step = "form"
+                            st.success(f"登录成功！user_id: {result.user_id}")
                             st.rerun()
                         else:
                             st.warning(result.message)
+                            st.info("请确认已用东方财富APP完成扫码，然后重试。")
+                            if st.button("🔄 重新检测"):
+                                st.rerun()
                     except Exception as e:
                         st.error(f"检测异常: {e}")
 
-            # 显示登录结果
-            if st.session_state.login_result and not st.session_state.login_result.success:
-                result = st.session_state.login_result
-                st.info(f"上次检测结果: {result.message}")
+                if st.button("↩️ 返回"):
+                    st.session_state.reg_step = "qr"
+                    st.rerun()
 
-        with right_col:
-            st.markdown("#### 🖼️ 二维码")
-            if st.session_state.qr_generated and st.session_state.qr_image_path:
-                if Path(st.session_state.qr_image_path).exists():
-                    st.image(
-                        st.session_state.qr_image_path,
-                        caption=f"请用东方财富APP扫描 | 账户: {st.session_state.qr_account}",
-                        use_container_width=True,
+            elif st.session_state.reg_step == "form":
+                st.write("**步骤 3/3：补录信息**")
+                st.success(f"东财登录已确认，user_id: {st.session_state.reg_user_id}")
+
+                phone = st.text_input("手机号", key="reg_phone_input")
+                username = st.text_input(
+                    "昵称",
+                    value=st.session_state.get("reg_nickname", ""),
+                    key="reg_username_input",
+                )
+                enable_sync = st.checkbox("启用自选股同步", value=True,
+                                          help="注册后自动将该账户纳入揽宝自选股同步列表")
+
+                if st.button("✅ 完成注册", use_container_width=True):
+                    # 写入 users 表
+                    ok, msg = register_eastmoney_user(
+                        db_path=DB_PATH,
+                        account_id="default",
+                        cookie=st.session_state.reg_cookie,
+                        user_id=st.session_state.reg_user_id,
+                        phone=phone,
+                        username=username,
                     )
-                    st.info("💡 扫描后请点击左侧「检测登录状态」按钮")
-                else:
-                    st.warning("二维码图片已过期，请重新生成")
-            else:
-                st.info("点击左侧「生成登录二维码」按钮后，二维码将显示在这里")
+                    if ok:
+                        # 更新 auto_favor.yaml（如启用同步）
+                        if enable_sync:
+                            accounts_cfg = _load_account_config()
+                            account_name = username or f"user_{st.session_state.reg_user_id[:8]}"
+                            # 避免重复
+                            exists = any(
+                                cfg.get("env_prefix", "") == "" and aid != "default"
+                                for aid, cfg in accounts_cfg.items()
+                            )
+                            if not exists:
+                                prefix = _get_next_env_prefix(accounts_cfg)
+                                accounts_cfg[account_name] = {
+                                    "name": account_name,
+                                    "env_prefix": prefix,
+                                    "target_group": "自选股",
+                                    "enabled": True,
+                                }
+                                _save_account_config(accounts_cfg)
+                                # 写入 .env 凭证（使用新前缀）
+                                env.update_account_credentials(account_name, st.session_state.reg_cookie, st.session_state.reg_user_id)
+                                env.save()
+
+                        st.success(f"注册成功！{msg}")
+                        # 重置状态
+                        for k in ["reg_step", "reg_cookie", "reg_user_id", "reg_nickname",
+                                  "qr_generated", "qr_image_path", "qr_account"]:
+                            st.session_state[k] = "" if "path" in k or "cookie" in k or "id" in k else False
+                        st.session_state.reg_step = "idle"
+                        st.rerun()
+                    else:
+                        st.error(f"注册失败: {msg}")
+
+                if st.button("↩️ 返回"):
+                    st.session_state.reg_step = "qr"
+                    st.rerun()
 
         st.divider()
 
-        # --- 底部: 手动配置 ---
+        # --- 底部: 手动配置（高级） ---
+        accounts = _load_account_config()
+        account_options = {
+            aid: cfg.get("name", aid)
+            for aid, cfg in accounts.items()
+            if cfg.get("enabled", True)
+        }
         with st.expander("✏️ 手动配置凭证（高级）"):
             manual_account = st.selectbox(
                 "选择账户",
@@ -808,7 +914,12 @@ with tab7:
                     env.update_account_credentials(manual_account, new_cookie, new_uid)
                     env.save()
                     st.success(f"已保存 {manual_account} 账户的凭证")
-                    # 验证
+                    # 同步更新 users 表
+                    with sqlite3.connect(DB_PATH) as conn:
+                        existing = get_user_by_user_id(conn, new_uid, "eastmoney")
+                        if existing:
+                            from user_manager import update_user
+                            update_user(conn, new_uid, "eastmoney", cookie=new_cookie)
                     is_valid, msg = verify_account_sync(manual_account)
                     if is_valid:
                         st.success(f"验证通过: {msg}")
