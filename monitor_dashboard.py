@@ -630,6 +630,12 @@ if '/root/lanbao/scripts/auto_favor' not in sys.path:
 if '/root/lanbao/tools/eastmoney-mcp-server/src' not in sys.path:
     sys.path.insert(0, '/root/lanbao/tools/eastmoney-mcp-server/src')
 
+# Streamlit 热重载时清除模块缓存，确保代码变更立即生效
+import importlib
+for _mod_name in ('login_eastmoney', 'user_manager', 'env_manager'):
+    if _mod_name in sys.modules:
+        importlib.reload(sys.modules[_mod_name])
+
 try:
     from env_manager import EnvManager
     from login_eastmoney import (
