@@ -699,13 +699,21 @@ with tab7:
         env = EnvManager("/root/lanbao/tools/eastmoney-mcp-server/.env")
 
         # --- session_state 初始化 ---
-        for key in ["reg_step", "reg_cookie", "reg_user_id", "reg_qr_path",
-                    "qr_generated", "qr_image_path", "qr_account", "login_result",
-                    "reg_persistent_dir"]:
+        defaults = {
+            "reg_step": "idle",
+            "reg_cookie": "",
+            "reg_user_id": "",
+            "reg_qr_path": "",
+            "qr_generated": False,
+            "qr_image_path": "",
+            "qr_account": "",
+            "login_result": None,
+            "reg_persistent_dir": "",
+            "reg_nickname": "",
+        }
+        for key, val in defaults.items():
             if key not in st.session_state:
-                st.session_state[key] = "" if "path" in key or "cookie" in key or "id" in key or "dir" in key else False
-        if st.session_state.reg_step == "":
-            st.session_state.reg_step = "idle"
+                st.session_state[key] = val
 
         # --- 两栏布局 ---
         left_col, right_col = st.columns([1, 1])
@@ -750,7 +758,7 @@ with tab7:
 
         # ========== 右栏：新用户注册 ==========
         with right_col:
-            st.markdown("#### 📝 新用户注册")
+            st.markdown(f"#### 📝 新用户注册{st.session_state.reg_step}")
 
             if st.session_state.reg_step == "idle":
                 st.info("欢迎注册揽宝！请填写昵称并开始扫码登录。")
@@ -876,10 +884,14 @@ with tab7:
 
                         st.success(f"注册成功！{msg}")
                         # 重置状态
-                        for k in ["reg_step", "reg_cookie", "reg_user_id", "reg_nickname",
-                                  "qr_generated", "qr_image_path", "qr_account", "reg_persistent_dir"]:
-                            st.session_state[k] = "" if "path" in k or "cookie" in k or "id" in k or "dir" in k else False
                         st.session_state.reg_step = "idle"
+                        st.session_state.reg_cookie = ""
+                        st.session_state.reg_user_id = ""
+                        st.session_state.reg_nickname = ""
+                        st.session_state.qr_generated = False
+                        st.session_state.qr_image_path = ""
+                        st.session_state.qr_account = ""
+                        st.session_state.reg_persistent_dir = ""
                         st.rerun()
                     else:
                         st.error(f"注册失败: {msg}")
