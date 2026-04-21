@@ -700,9 +700,10 @@ with tab7:
 
         # --- session_state 初始化 ---
         for key in ["reg_step", "reg_cookie", "reg_user_id", "reg_qr_path",
-                    "qr_generated", "qr_image_path", "qr_account", "login_result"]:
+                    "qr_generated", "qr_image_path", "qr_account", "login_result",
+                    "reg_persistent_dir"]:
             if key not in st.session_state:
-                st.session_state[key] = "" if "path" in key or "cookie" in key or "id" in key else False
+                st.session_state[key] = "" if "path" in key or "cookie" in key or "id" in key or "dir" in key else False
         if st.session_state.reg_step == "":
             st.session_state.reg_step = "idle"
 
@@ -766,10 +767,13 @@ with tab7:
 
                 if not st.session_state.qr_generated:
                     if st.button("🔑 生成登录二维码", use_container_width=True):
+                        import uuid
                         qr_path = "/tmp/eastmoney_qr_register.png"
+                        persistent_dir = f"/tmp/eastmoney_browser_{uuid.uuid4().hex}"
+                        st.session_state.reg_persistent_dir = persistent_dir
                         with st.spinner("正在启动浏览器..."):
                             try:
-                                ok = generate_qr_code_sync("default", qr_path)
+                                ok = generate_qr_code_sync("default", qr_path, persistent_dir)
                                 if ok:
                                     st.session_state.qr_generated = True
                                     st.session_state.qr_image_path = qr_path
@@ -797,13 +801,15 @@ with tab7:
                 if st.button("↩️ 返回"):
                     st.session_state.reg_step = "idle"
                     st.session_state.qr_generated = False
+                    st.session_state.reg_persistent_dir = ""
                     st.rerun()
 
             elif st.session_state.reg_step == "check":
                 st.write("**步骤 2/3：检测登录状态**")
                 with st.spinner("正在检测..."):
                     try:
-                        result = check_login_sync("default", dry_run=False)
+                        persistent_dir = st.session_state.get("reg_persistent_dir", "")
+                        result = check_login_sync("default", dry_run=False, persistent_dir=persistent_dir)
                         if result.success:
                             st.session_state.reg_cookie = result.cookie
                             st.session_state.reg_user_id = result.user_id
@@ -871,8 +877,8 @@ with tab7:
                         st.success(f"注册成功！{msg}")
                         # 重置状态
                         for k in ["reg_step", "reg_cookie", "reg_user_id", "reg_nickname",
-                                  "qr_generated", "qr_image_path", "qr_account"]:
-                            st.session_state[k] = "" if "path" in k or "cookie" in k or "id" in k else False
+                                  "qr_generated", "qr_image_path", "qr_account", "reg_persistent_dir"]:
+                            st.session_state[k] = "" if "path" in k or "cookie" in k or "id" in k or "dir" in k else False
                         st.session_state.reg_step = "idle"
                         st.rerun()
                     else:
