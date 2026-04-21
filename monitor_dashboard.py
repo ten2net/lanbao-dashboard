@@ -27,6 +27,13 @@ OPT_PARAMS = get_opt_params()
 
 st.title("📊 揽宝量化 - 好运哥2008 监控看板")
 
+# 确保 users 表存在（支持东财用户自助注册）
+sys.path.insert(0, '/root/lanbao/scripts/auto_favor')
+from user_manager import ensure_users_table
+
+with sqlite3.connect(DB_PATH) as conn:
+    ensure_users_table(conn)
+
 # ==================== 数据加载函数 ====================
 
 def ensure_reflections_table():
